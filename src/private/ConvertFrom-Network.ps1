@@ -7,7 +7,7 @@ function ConvertFrom-Network {
         [int] $CategoryDepth = 1,
         [string[]] $ExcludeTypes
     )
-    
+
     begin {
         $rank = @{
             "Microsoft.Network/publicIPAddresses"     = 1
@@ -38,80 +38,81 @@ function ConvertFrom-Network {
     process {
         foreach ($Target in $Targets) {
             $ResourceGroup = $Target
-            Write-CustomHost "🌐 Gathering network topology for RG: '$ResourceGroup'" -Indentation 1 -Color Cyan
+            Write-CustomHost "Analyzing network topology for resource group: `'$Target`'" -Indentation 1 -color Cyan
 
             try {
                 $location = (Get-AzResourceGroup -Name $ResourceGroup -Verbose:$false).Location
-                $networkWatcher = Get-AzNetworkWatcher -Location $location -ErrorAction SilentlyContinue
+                $networkWatcher = Get-AzNetworkWatcher -Location $location -ErrorAction SilentlyContinue -Verbose:$false
             } catch {
-                Write-CustomHost "❌ Failed to locate Network Watcher for RG: '$ResourceGroup'" -Indentation 2 -Color Red
+                Write-CustomHost "Failed to get location or network watcher for: $ResourceGroup" -Color Red
                 continue
             }
 
-            if ($networkWatcher) {
-                Write-CustomHost "🔎 Network watcher found: '$($networkWatcher.Name)'" -Indentation 2 -Color Green
-                $Topology = Get-AzNetworkWatcherTopology -NetworkWatcher $networkWatcher -TargetResourceGroupName $ResourceGroup -Verbose:$false
-                $Resources = $Topology.Resources
-            } else {
-                Write-CustomHost "⚠ No Network Watcher in region. Skipping '$ResourceGroup'" -Indentation 2 -Color Yellow
+            if (-not $networkWatcher) {
+                Write-CustomHost "Network watcher not found for '$ResourceGroup'" -Indentation 2 -Color Yellow
                 continue
             }
 
-            if (!$Resources) {
-                Write-CustomHost "⚠ No network resources found. Skipping." -Indentation 2 -Color Yellow
+            $Topology = Get-AzNetworkWatcherTopology -NetworkWatcher $networkWatcher -TargetResourceGroupName $ResourceGroup -Verbose:$false 
+            $resources = $Topology.Resources
+
+            if (-not $resources) {
+                Write-CustomHost "No network-related resources found in: $ResourceGroup" -Indentation 2 -Color Yellow
                 continue
             }
 
             $data = @()
-            $skipExternalMsgShown = $false
+            $SkipMsgFlag = $true
 
-            $data += $Resources | ForEach-Object {
-                $from = $_.Name
-                $fromcateg = (Get-AzResource -ResourceId $_.Id -ErrorAction SilentlyContinue).ResourceType
-                $rankValue = $rank[$fromcateg] | ForEach-Object { $_ } | DefaultIfEmpty 9999
-
-                $associations = $_.AssociationText | ConvertFrom-Json
-
-                if ($associations) {
-                    foreach ($assoc in $associations) {
-                        $assocRGMatch = $assoc.ResourceId -match "/resourceGroups/$ResourceGroup"
-                        if ($assocRGMatch) {
-                            $to = $assoc.name
-                            $toCateg = (Get-AzResource -ResourceId $assoc.ResourceId -ErrorAction SilentlyContinue).ResourceType
+            $data += $resources | 
+            Select-Object @{n='from'; e={$_.name}},
+                          @{n='fromcateg'; e={(Get-AzResource -ResourceId $_.id -ErrorAction SilentlyContinue -Verbose:$false).ResourceType}},
+                          Associations,
+                          @{n='to'; e={ ($_.AssociationText | ConvertFrom-Json) | Select-Object name, AssociationType, resourceID }} |
+            Where-Object { $_.fromcateg -and ($_.fromcateg.split("/").count -le ($CategoryDepth + 1)) } |
+            ForEach-Object {
+                if ($_.to) {
+                    foreach ($to in $_.to) {
+                        if ($to.ResourceID -like "*$ResourceGroup*") {
+                            $fromCateg = $_.fromcateg
+                            $r = $rank[$fromCateg]
                             [PSCustomObject]@{
-                                from        = $from
-                                fromcateg   = $fromcateg
-                                to          = $to
-                                tocateg     = $toCateg
-                                association = $assoc.AssociationType
-                                rank        = $rankValue
+                                fromcateg   = $fromCateg
+                                from        = $_.from
+                                to          = $to.name
+                                toCateg     = (Get-AzResource -ResourceId $to.resourceID -ErrorAction SilentlyContinue).ResourceType
+                                association = $to.associationType
+                                rank        = if ($r) { $r } else { 9999 }
                             }
                         } else {
-                            if (-not $skipExternalMsgShown) {
-                                Write-CustomHost "⚠ Skipping resources outside RG '$ResourceGroup'" -Indentation 3 -Color Yellow
-                                $skipExternalMsgShown = $true
+                            if ($SkipMsgFlag) {
+                                Write-CustomHost "Skipping external associations not in RG '$ResourceGroup'" -Indentation 3 -color Yellow
+                                $SkipMsgFlag = $false
                             }
-                            Write-CustomHost "$($assoc.ResourceId)" -Indentation 4 -Color Yellow
+                            Write-CustomHost "External ID: $($to.ResourceID)" -Indentation 4 -color Yellow
                         }
                     }
                 } else {
+                    $r = $rank[$_.fromcateg]
                     [PSCustomObject]@{
-                        from        = $from
-                        fromcateg   = $fromcateg
+                        fromcateg   = $_.fromcateg
+                        from        = $_.from
                         to          = ''
-                        tocateg     = ''
+                        toCateg     = ''
                         association = ''
-                        rank        = $rankValue
+                        rank        = if ($r) { $r } else { 9999 }
                     }
                 }
-            } | Where-Object $scriptblock | Sort-Object rank
+            } | Sort-Object rank
 
             [PSCustomObject]@{
                 Type      = $TargetType
-                Name      = $ResourceGroup
-                Resources = $data
+                Name      = $Target
+                Resources = $data | Where-Object $scriptblock
             }
         }
     }
+    
+    end {}
 }
 

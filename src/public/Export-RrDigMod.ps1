@@ -1,98 +1,108 @@
+<#
+.SYNOPSIS
+    Exports Azure infrastructure topology and visualizes it using Graphviz.
+
+.DESCRIPTION
+    Generates a DOT language diagram of Azure resources from ARM templates and network associations,
+    then exports to SVG (or PNG) format using Graphviz. Designed for large-scale infrastructures.
+
+.PARAMETER ResourceGroup
+    One or more Azure Resource Groups to visualize.
+
+.PARAMETER OutputFormat
+    Diagram output format: 'svg' (default) or 'png'.
+
+.PARAMETER OutputFilePath
+    Full path where the output diagram will be saved.
+
+.PARAMETER Direction
+    Graph layout direction: 'top-to-bottom' (default) or 'left-to-right'.
+
+.PARAMETER CategoryDepth
+    Controls resource sub-type resolution: 1 (default), 2, etc.
+
+.PARAMETER LabelVerbosity
+    Label detail level: 1 = name only, 2 = name + type.
+
+.PARAMETER Theme
+    Visual theme: 'light' (default), 'dark', or 'neon'.
+
+.EXAMPLE
+    Export-RrDigMod -ResourceGroup 'my-rg' -OutputFormat 'svg' -Direction 'left-to-right' -OutputFilePath './mydiagram.svg'
+#>
+
 function Export-RrDigMod {
     [CmdletBinding()]
     param (
-        [Parameter(ParameterSetName = 'AzLogin', Mandatory = $true, Position = 0)]
+        [Parameter(Mandatory = $true)]
         [string[]] $ResourceGroup,
 
-        [Parameter(ParameterSetName = 'AzLogin')]
-        [switch] $Show,
-
-        [Parameter(ParameterSetName = 'AzLogin')]
-        [ValidateSet(1, 2, 3)]
-        [int] $LabelVerbosity = 2,
-
-        [Parameter(ParameterSetName = 'AzLogin')]
-        [ValidateSet(1, 2, 3)]
-        [int] $CategoryDepth = 2,
-
-        [Parameter(ParameterSetName = 'AzLogin')]
-        [ValidateSet('png', 'svg')]
+        [ValidateSet('svg', 'png')]
         [string] $OutputFormat = 'svg',
 
-        [Parameter(ParameterSetName = 'AzLogin')]
-        [ValidateSet('light', 'dark', 'neon')]
-        [string] $Theme = 'light',
-
-        [Parameter(ParameterSetName = 'AzLogin')]
-        [ValidateSet('left-to-right', 'top-to-bottom')]
+        [ValidateSet('top-to-bottom', 'left-to-right')]
         [string] $Direction = 'top-to-bottom',
 
-        [Parameter(ParameterSetName = 'AzLogin')]
-        [string] $OutputFilePath = (Join-Path ([System.IO.Path]::GetTempPath()) "rrdigmod_output.svg"),
+        [string] $OutputFilePath = "$PWD\rrdigmod-output.svg",
 
-        [Parameter(ParameterSetName = 'AzLogin')]
-        [ValidateSet('polyline', 'curved', 'ortho', 'line', 'spline')]
-        [string] $Splines = 'spline',
+        [ValidateSet(1,2,3)]
+        [int] $CategoryDepth = 1,
 
-        [Parameter(ParameterSetName = 'AzLogin')]
-        [string[]] $ExcludeTypes
+        [ValidateSet(1,2)]
+        [int] $LabelVerbosity = 1,
+
+        [ValidateSet('light', 'dark', 'neon')]
+        [string] $Theme = 'light'
     )
 
-    try {
-        $ErrorActionPreference = 'Stop'
-        $StartTime = [datetime]::Now
+    begin {
+        Write-CustomHost "🔧 Starting Export-RrDigMod..." -Color Cyan -AddTime
 
-        Write-Host "`n🎯 Starting rrdigmod SVG export..."
-        $GraphViz = Get-DOTExecutable
-        if (-not $GraphViz) {
-            Write-Error "❌ Graphviz is not installed. Please install from https://graphviz.org/download/." -ErrorAction Stop
+        if (!(Test-AzLogin)) {
+            Write-CustomHost "❌ Not logged into Azure. Run Connect-AzAccount first." -Color Red
+            return
         }
 
-        # Thematic Colors
-        . "$PSScriptRoot/../private/ThemeHandler.ps1" -Theme $Theme
+        # Validate Graphviz
+        $dotExe = Get-DOTExecutable
+        if (-not $dotExe) {
+            Write-Error "'GraphViz' not installed. Download from https://graphviz.org/download/"
+            return
+        }
 
-        $TargetType = 'Azure Resource Group'
+        # Set global theme colors
+        Set-Theme -Theme $Theme
+    }
+
+    process {
         $Targets = $ResourceGroup
+        $DOTString = ConvertTo-DOTLanguage -Targets $Targets `
+                                           -TargetType 'Azure Resource Group' `
+                                           -LabelVerbosity $LabelVerbosity `
+                                           -CategoryDepth $CategoryDepth `
+                                           -Direction $Direction `
+                                           -Splines 'spline' `
+                                           -ExcludeTypes @()
 
-        Write-Host "⚙️  Configuration:"
-        Write-Host "  RGs: $($ResourceGroup -join ', ')"
-        Write-Host "  Format: $OutputFormat"
-        Write-Host "  Theme: $Theme"
-        Write-Host "  Label Verbosity: $LabelVerbosity"
-        Write-Host "  Category Depth: $CategoryDepth"
-        Write-Host "  Output Path: $OutputFilePath"
+        $OutputFile = if ($OutputFilePath) { $OutputFilePath } else { "$PWD\rrdigmod-output.$OutputFormat" }
 
-        # Generate .dot
-        $GraphDot = ConvertTo-DOTLanguage `
-            -TargetType $TargetType `
-            -Targets $Targets `
-            -CategoryDepth $CategoryDepth `
-            -LabelVerbosity $LabelVerbosity `
-            -Splines $Splines `
-            -ExcludeTypes $ExcludeTypes `
-            -IconDirectory (Join-Path $PSScriptRoot '../../icons') `
-            -OutputFormat $OutputFormat `
-            -Theme $Theme `
-            -Direction $Direction
+        Write-CustomHost "🖨️  Saving diagram to: $OutputFile" -Color Green -AddTime
 
-        if ($GraphDot) {
-            @"
-strict $GraphDot
-"@ | Export-PSGraph `
-    -GraphVizPath $GraphViz.FullName `
-    -ShowGraph:$Show `
-    -OutputFormat $OutputFormat `
-    -DestinationPath $OutputFilePath |
-    Out-Null
+        $tempDOT = New-TemporaryFile
+        $DOTString | Out-File -FilePath $tempDOT -Encoding ascii
 
-            Write-Host "`n✅ Export completed: $OutputFilePath"
+        & $dotExe.FullName -T$OutputFormat -o $OutputFile $tempDOT
+        Remove-Item $tempDOT -Force
+
+        if (Test-Path $OutputFile) {
+            Write-CustomHost "✅ Export complete: $OutputFile" -Color Green -AddTime
         } else {
-            Write-Warning "No DOT graph content generated."
+            Write-CustomHost "❌ Failed to generate the output diagram." -Color Red
         }
-    } catch {
-        Write-Error "❌ Error: $_"
+    }
+
+    end {
+        Write-CustomHost "🏁 Export-RrDigMod finished." -Color Cyan -AddTime
     }
 }
-
-Export-ModuleMember -Function Export-RrDigMod
 

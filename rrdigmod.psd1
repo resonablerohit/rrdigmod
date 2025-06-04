@@ -1,6 +1,11 @@
-# Load all ps1 files
-$Path = Join-Path $PSScriptRoot 'src'
-Get-ChildItem $Path -Filter *.ps1 -Recurse | ForEach-Object {
-    . $_.FullName
+@{
+    RootModule        = 'rrdigmod.psm1'
+    ModuleVersion     = '1.0.0'
+    Author            = 'Rohit Raj'
+    CompanyName       = 'RohitR'
+    Description       = 'PowerShell module to export Azure diagrams in SVG format'
+    FunctionsToExport = @('Export-RrDigMod')
+    CmdletsToExport   = @()
+    VariablesToExport = @()
+    AliasesToExport   = @()
 }
-Write-Host "✅ Module loaded: rrdigmod"
